@@ -22,6 +22,7 @@ const CURLP_HALF_STATE_LEN: usize = CURLP_STATE_LEN / 2;
 const TRUTH_TABLE: [i8; 11] = [1, 0, -1, 2, 1, -1, 0, 2, -1, 1, 0];
 
 /// An owned, mutable 
+#[derive(Clone, Debug)]
 pub struct TritsBuf(Vec<i8>);
 
 pub enum ValidTrits {
@@ -49,10 +50,12 @@ impl TritsBuf {
         Self(vec![0; capacity])
     }
 
+    /// Return a read-only view of the buffer in form of a `Trits`.
     pub fn as_trits(&self) -> Trits<'_> {
         Trits(&self.0)
     }
 
+    /// Return a read-write view of the buffer in form of a `TritsMut`.
     pub fn as_trits_mut(&mut self) -> TritsMut<'_> {
         TritsMut(&mut self.0)
     }
@@ -62,6 +65,39 @@ impl TritsBuf {
         self.0
             .iter_mut()
             .for_each(|x| *x = v);
+    }
+
+    /// Create a `Trits` from a `&[i8]` slice without verifying that its bytes are
+    /// correctly binary-coded balanced trits (-1, 0, and +1).
+    ///
+    /// This function is intended to be used in hot loops and relies on the user making sure that
+    /// the bytes are set correctly.
+    ///
+    /// **NOTE:** Use the `TryFrom` trait if you want to check that the slice encodes trits
+    /// correctly before creating `Trits`.
+    ///
+    /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
+    /// usage of `Trits` might lead to unexpected behaviour.
+    pub fn from_i8_unchecked(v: &[i8]) -> Self {
+        Self(v.to_owned())
+    }
+
+    /// Create a `Trits` from a `&[u8]` slice without verifying that its bytes are
+    /// correctly binary-coded balanced trits (-1, 0, and +1 transmuted to unsigned bytes).
+    ///
+    /// This function is intended to be used in hot loops and relies on the user making sure that
+    /// the bytes are set correctly.
+    ///
+    /// **NOTE:** Use the `TryFrom` trait if you want to check that the slice encodes trits
+    /// correctly before creating `Trits`.
+    ///
+    /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
+    /// usage of `Trits` might lead to unexpected behaviour.
+    pub fn from_u8_unchecked(v: &[u8]) -> Self {
+        Self::from_i8_unchecked(
+            unsafe {
+                &*(v as *const _ as *const [i8])
+        })
     }
 }
 
@@ -77,10 +113,32 @@ impl<'a> Trits<'a> {
         self.0.len()
     }
 
+    /// Create a `Trits` from a `&[i8]` slice without verifying that its bytes are
+    /// correctly binary-coded balanced trits (-1, 0, and +1).
+    ///
+    /// This function is intended to be used in hot loops and relies on the user making sure that
+    /// the bytes are set correctly.
+    ///
+    /// **NOTE:** Use the `TryFrom` trait if you want to check that the slice encodes trits
+    /// correctly before creating `Trits`.
+    ///
+    /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
+    /// usage of `Trits` might lead to unexpected behaviour.
     pub fn from_i8_unchecked(v: &'a [i8]) -> Self {
         Self(v)
     }
 
+    /// Create a `Trits` from a `&[u8]` slice without verifying that its bytes are
+    /// correctly binary-coded balanced trits (-1, 0, and +1 transmuted to unsigned bytes).
+    ///
+    /// This function is intended to be used in hot loops and relies on the user making sure that
+    /// the bytes are set correctly.
+    ///
+    /// **NOTE:** Use the `TryFrom` trait if you want to check that the slice encodes trits
+    /// correctly before creating `Trits`.
+    ///
+    /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
+    /// usage of `Trits` might lead to unexpected behaviour.
     pub fn from_u8_unchecked(v: &[u8]) -> Self {
         Self::from_i8_unchecked(
             unsafe {
@@ -119,7 +177,6 @@ impl<'a> TryFrom<&'a [i8]> for Trits<'a> {
     }
 }
 
-/// Similar impls for `TritsMutMut` and `TritsMutBuf`
 impl<'a> TritsMut<'a> {
     pub fn len(&self) -> usize {
         self.0.len()
@@ -214,6 +271,9 @@ pub struct CurlP {
 
     /// The internal state.
     state: TritsBuf,
+
+    /// Workspace for performing transformations
+    work_state: TritsBuf,
 }
 
 impl CurlP {
@@ -222,6 +282,7 @@ impl CurlP {
         Self {
             rounds,
             state: TritsBuf::with_capacity(CURLP_STATE_LEN),
+            work_state: TritsBuf::with_capacity(CURLP_STATE_LEN),
         }
     }
 
@@ -230,6 +291,11 @@ impl CurlP {
         self.rounds
     }
 
+    /// Transforms the internal state of the `CurlP` sponge after the input was copied
+    /// into the internal state.
+    ///
+    /// The essence of this transformation is the application of a so-called substitution box to
+    /// the internal state, which happens `round` number of times.
     fn transform(&mut self) {
         fn apply_substitution_box(input: &[i8], output: &mut [i8]) {
             assert!(input.len() <= CURLP_STATE_LEN);
@@ -252,9 +318,7 @@ impl CurlP {
             }
         }
 
-        let mut local_state = TritsBuf::with_capacity(CURLP_STATE_LEN);
-
-        let (mut lhs, mut rhs) = (&mut local_state.0, &mut self.state.0);
+        let (mut lhs, mut rhs) = (&mut self.state.0, &mut self.work_state.0);
 
         for _ in 0..self.rounds {
             apply_substitution_box(lhs, rhs);
@@ -266,7 +330,14 @@ impl CurlP {
 impl Sponge for CurlP {
     const HASH_LEN: usize = HASH_LEN;
 
-     fn absorb(&mut self, input: &Trits) {
+    /// Absorb `input` into the sponge by copying `HASH_LEN` chunks of it into its internal
+    /// state and transforming the state before moving on to the next chunk.
+    ///
+    /// If `input` is not a multiple of `HASH_LEN` with the last chunk having `n < HASH_LEN` trits,
+    /// the last chunk will be copied to the first `n` slots of the internal state. The remaining
+    /// data in the internal state is then just the result of the last transformation before the
+    /// data was copied, and will be reused for the next transformation.
+    fn absorb(&mut self, input: &Trits) {
         for chunk in input.0.chunks(Self::HASH_LEN) {
             self.state
                 .0[0..chunk.len()]
@@ -275,12 +346,18 @@ impl Sponge for CurlP {
         }
     }
 
+    /// Reset the internal state by overwriting it with zeros.
     fn reset(&mut self) {
         self
             .state
             .fill(ValidTrits::Zero);
     }
 
+    /// Squeeze the sponge by copying the calculated hash into the provided `buf`. This will fill
+    /// the buffer in chunks of `HASH_LEN` at a time.
+    ///
+    /// If the last chunk is smaller than `HASH_LEN`, then only the fraction that fits is written
+    /// into it.
     fn squeeze_into(&mut self, buf: &mut TritsMut) {
         for chunk in buf.0.chunks_mut(Self::HASH_LEN) {
             chunk.copy_from_slice(
@@ -292,6 +369,7 @@ impl Sponge for CurlP {
     }
 }
 
+/// `CurlP` with a fixed number of 27 rounds.
 pub struct CurlP27(CurlP);
 
 impl CurlP27 {
@@ -306,6 +384,7 @@ impl Default for CurlP27 {
     }
 }
 
+/// `CurlP` with a fixed number of 81 rounds.
 pub struct CurlP81(CurlP);
 
 impl CurlP81 {
@@ -319,3 +398,36 @@ impl Default for CurlP81 {
         CurlP81::new()
     }
 }
+
+macro_rules! forward_sponge_impl {
+    ($($t:ty),+) => {
+
+    $(
+        impl $t {
+            /// Return the number of rounds used in this `CurlP` instacnce.
+            pub fn rounds(&self) -> usize {
+                self.0.rounds
+            }
+        }
+
+        impl Sponge for $t {
+            const HASH_LEN: usize = 243;
+
+            fn absorb(&mut self, input: &Trits) {
+                self.0.absorb(input)
+            }
+
+            fn reset(&mut self) {
+                self.0.reset()
+            }
+
+            fn squeeze_into(&mut self, buf: &mut TritsMut) {
+                self.0.squeeze_into(buf);
+            }
+        }
+    )+
+    }
+}
+
+forward_sponge_impl!(CurlP27, CurlP81);
+
