@@ -401,12 +401,21 @@ impl Sponge for CurlP {
     /// If the last chunk is smaller than `HASH_LEN`, then only the fraction that fits is written
     /// into it.
     fn squeeze_into(&mut self, buf: &mut TritsMut) {
+        let trit_count = buf.len();
+        let hash_count = trit_count / Self::HASH_LEN;
+
         for chunk in buf.0.chunks_mut(Self::HASH_LEN) {
             chunk.copy_from_slice(
                 &self.state
                     .0[0..chunk.len()]
             );
             self.transform()
+        }
+
+        let last = trit_count - hash_count * Self::HASH_LEN;
+        buf.0[trit_count - last..].copy_from_slice(&self.state.0[0..last]);
+        if trit_count % Self::HASH_LEN != 0 {
+            self.transform();
         }
     }
 }
