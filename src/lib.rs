@@ -313,9 +313,6 @@ pub struct CurlP {
 
     /// The internal state.
     state: TritsBuf,
-
-    /// Workspace for performing transformations
-    work_state: TritsBuf,
 }
 
 impl CurlP {
@@ -324,7 +321,6 @@ impl CurlP {
         Self {
             rounds,
             state: TritsBuf::with_capacity(CURLP_STATE_LEN),
-            work_state: TritsBuf::with_capacity(CURLP_STATE_LEN),
         }
     }
 
@@ -339,32 +335,25 @@ impl CurlP {
     /// The essence of this transformation is the application of a so-called substitution box to
     /// the internal state, which happens `round` number of times.
     fn transform(&mut self) {
-        fn apply_substitution_box(input: &[i8], output: &mut [i8]) {
-            assert!(input.len() <= CURLP_STATE_LEN);
-            assert!(output.len() <= CURLP_STATE_LEN);
+        let mut local_state = TritsBuf::with_capacity(CURLP_STATE_LEN);
+        local_state.0.copy_from_slice(&self.state.0);
 
-            output[0] = TRUTH_TABLE[(input[0] + (input[364] << 2) + 5) as usize];
+        let mut s1 = self.state.0.as_mut_ptr();
+        let mut s2 = local_state.0.as_mut_ptr();
 
-            for state_index in 0..CURLP_HALF_STATE_LEN {
-                let in_idx_a = CURLP_HALF_STATE_LEN - state_index;
-                let in_idx_b = CURLP_STATE_LEN - state_index - 1;
+        unsafe {
+            for _ in 0..self.rounds {
+                *s1 = TRUTH_TABLE[(*s2 + (*s2.offset(364) << 2) + 5) as usize];
 
-                output[2 * state_index + 1] = TRUTH_TABLE[
-                    { input[in_idx_a] + (input[in_idx_b] << 2) + 5 } as usize
-                ];
+                for i in 0..364 {
+                    *s1.offset(2 * i + 1) = TRUTH_TABLE
+                        [(*s2.offset(364 - i) + (*s2.offset(729 - (i + 1)) << 2) + 5) as usize];
+                    *s1.offset(2 * i + 2) = TRUTH_TABLE
+                        [(*s2.offset(729 - (i + 1)) + (*s2.offset(364 - (i + 1)) << 2) + 5) as usize];
+                }
 
-                let in_idx_a = in_idx_a - 1;
-                output[2 * state_index + 2] = TRUTH_TABLE[
-                    { input[in_idx_b] + (input[in_idx_a] << 2) + 5 } as usize
-                ];
+                core::mem::swap(&mut s1, &mut s2);
             }
-        }
-
-        let (mut lhs, mut rhs) = (&mut self.state.0, &mut self.work_state.0);
-
-        for _i in 0..self.rounds {
-            apply_substitution_box(lhs, rhs);
-            std::mem::swap(&mut lhs, &mut rhs);
         }
     }
 }
@@ -401,7 +390,7 @@ impl Sponge for CurlP {
     /// If the last chunk is smaller than `HASH_LEN`, then only the fraction that fits is written
     /// into it.
     fn squeeze_into(&mut self, buf: &mut TritsMut) {
-        let trit_count = buf.len();
+        let trit_count = buf.0.len();
         let hash_count = trit_count / Self::HASH_LEN;
 
         for chunk in buf.0.chunks_mut(Self::HASH_LEN) {
@@ -485,45 +474,31 @@ forward_sponge_impl!(CurlP27, CurlP81);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::trytes_to_trits_buf;
-
-    const INPUT_DATA: &'static str = "\
-RSWWSFXPQJUBJROQBRQZWZXZJWMUBVIVMHPPTYSNW9YQIQQF9RCSJJCVZG9ZWITXNCSBBDHEEKDRBHVTWCZ9SZOOZHVBPCQNPKTWFNZAWGCZ9QDIMK\
-RVINMIRZBPKRKQAIPGOHBTHTGYXTBJLSURDSPEOJ9UKJECUKCCPVIQQHDUYKVKISCEIEGVOQWRBAYXWGSJUTEVG9RPQLPTKYCRAJ9YNCUMDVDYDQCK\
-RJOAPXCSUDAJGETALJINHEVNAARIPONBWXUOQUFGNOCUSSLYWKOZMZUKLNITZIFXFWQAYVJCVMDTRSHORGNSTKX9Z9DLWNHZSMNOYTU9AUCGYBVIIT\
-EPEKIXBCOFCMQPBGXYJKSHPXNUKFTXIJVYRFILAVXEWTUICZCYYPCEHNTK9SLGVL9RLAMYTAEPONCBHDXSEQZOXO9XCFUCPPMKEBR9IEJGQOPPILHF\
-XHMIULJYXZJASQEGCQDVYFOM9ETXAGVMSCHHQLFPATWOSMZIDL9AHMSDCE9UENACG9OVFAEIPPQYBCLXDMXXA9UBJFQQBCYKETPNKHNOUKCSSYLWZD\
-LKUARXNVKKKHNRBVSTVKQCZL9RY9BDTDTPUTFUBGRMSTOTXLWUHDMSGYRDSZLIPGQXIDMNCNBOAOI9WFUCXSRLJFIVTIPIAZUK9EDUJJ9B9YCJEZQQ\
-ELLHVCWDNRH9FUXDGZRGOVXGOKORTCQQA9JXNROLETYCNLRMBGXBL9DQKMOAZCBJGWLNJLGRSTYBKLGFVRUF9QOPZVQFGMDJA9TBVGFJDBAHEVOLW9\
-GNU9NICLCQJBOAJBAHHBZJGOFUCQMBGYQLCWNKSZPPBQMSJTJLM9GXOZHTNDLGIRCSIJAZTENQVQDHFSOQM9WVNWQQJNOPZMEISSCLOADMRNWALBBS\
-LSWNCTOSNHNLWZBVCFIOGFPCPRKQSRGKFXGTWUSCPZSKQNLQJGKDLOXSBJMEHQPDZGSENUKWAHRNONDTBLHNAKGLOMCFYRCGMDOVANPFHMQRFCZIQH\
-CGVORJJNYMTORDKPJPLA9LWAKAWXLIFEVLKHRKCDG9QPQCPGVKIVBENQJTJGZKFTNZHIMQISVBNLHAYSSVJKTIELGTETKPVRQXNAPWOBGQGFRMMK9U\
-QDWJHSQMYQQTCBMVQKUVGJEAGTEQDN9TCRRAZHDPSPIYVNKPGJSJZASZQBM9WXEDWGAOQPPZFLAMZLEZGXPYSOJRWL9ZH9NOJTUKXNTCRRDO9GKULX\
-BAVDRIZBOKJYVJUSHIX9F9O9ACYCAHUKBIEPVZWVJAJGSDQNZNWLIWVSKFJUMOYDMVUFLUXT9CEQEVRFBJVPCTJQCORM9JHLYFSMUVMFDXZFNCUFZZ\
-IKREIUIHUSHRPPOUKGFKWX9COXBAZMQBBFRFIBGEAVKBWKNTBMLPHLOUYOXPIQIZQWGOVUWQABTJT9ZZPNBABQFYRCQLXDHDEX9PULVTCQLWPTJLRS\
-VZQEEYVBVY9KCNEZXQLEGADSTJBYOXEVGVTUFKNCNWMEDKDUMTKCMRPGKDCCBDHDVVSMPOPUBZOMZTXJSQNVVGXNPPBVSBL9WWXWQNMHRMQFEQYKWN\
-CSW9URI9FYPT9UZMAFMMGUKFYTWPCQKVJ9DIHRJFMXRZUGI9TMTFUQHGXNBITDSORZORQIAMKY9VRYKLEHNRNFSEFBHF9KXIQAEZEJNQOENJVMWLMH\
-I9GNZPXYUIFAJIVCLAGKUZIKTJKGNQVTXJORWIQDHUPBBPPYOUPFAABBVMMYATXERQHPECDVYGWDGXFJKOMOBXKRZD9MCQ9LGDGGGMYGUAFGMQTUHZ\
-OAPLKPNPCIKUNEMQIZOCM9COAOMZSJ9GVWZBZYXMCNALENZ9PRYMHENPWGKX9ULUIGJUJRKFJPBTTHCRZQKEAHT9DC9GSWQEGDTZFHACZMLFYDVOWZ\
-ADBNMEM9XXEOMHCNJMDSUAJRQTBUWKJF9RZHK9ACGUNI9URFIHLXBXCEODONPXBSCWP9WNAEYNALKQHGULUQGAFL9LB9NBLLCACLQFGQMXRHGBTMI9\
-YKAJKVELRWWKJAPKMSYMJTDYMZ9PJEEYIRXRMMFLRSFSHIXUL9NEJABLRUGHJFL9RASMSKOI9VCFRZ9GWTMODUUESIJBHWWHZYCLDENBFSJQPIOYC9\
-MBGOOXSWEMLVU9L9WJXKZKVDBDMFSVHHISSSNILUMWULMVMESQUIHDGBDXROXGH9MTNFSLWJZRAPOKKRGXAAQBFPYPAAXLSTMNSNDTTJQSDQORNJS9\
-BBGQ9KQJZYPAQ9JYQZJ9B9KQDAXUACZWRUNGMBOQLQZUHFNCKVQGORRZGAHES9PWJUKZWUJSBMNZFILBNBQQKLXITCTQDDBV9UDAOQOUPWMXTXWFWV\
-MCXIXLRMRWMAYYQJPCEAAOFEOGZQMEDAGYGCTKUJBS9AGEXJAFHWWDZRYEN9DN9HVCMLFURISLYSWKXHJKXMHUWZXUQARMYPGKRKQMHVR9JEYXJRPN\
-ZINYNCGZHHUNHBAIJHLYZIZGGIDFWVNXZQADLEDJFTIUTQWCQSX9QNGUZXGXJYUUTFSZPQKXBA9DFRQRLTLUJENKESDGTZRGRSLTNYTITXRXRGVLWB\
-TEWPJXZYLGHLQBAVYVOSABIVTQYQM9FIQKCBRRUEMVVTMERLWOK\
-";
-
-    const EXPECTED_CURLP81_HASH: &'static str = "\
-KXRVLFETGUTUWBCNCC9DWO99JQTEI9YXVOZHWELSYP9SG9KN9WCKXOVTEFHFH9EFZJKFYCZKQPPBXYSGJ\
-";
 
     #[test]
-    fn verify_curlp27_hash() {
-        let mut curlp27 = CurlP27::new();
-        let input_trits = trytes_to_trits_buf(INPUT_DATA);
-        let expected_hash = trytes_to_trits_buf(EXPECTED_CURLP81_HASH);
-        let calculated_hash = curlp27.digest(&input_trits.as_trits());
+    fn verify_curlp81_hash() {
+        let input = vec![-1, 1, -1, -1, 1, -1, 1, 1, 0, -1, 0, 0, 1, 0, 1, 0, 0, 0, -1, -1, -1, -1, 0, 0, -1, 0, 0, 1, 0, 0, -1, 0, 0, 1, -1, 
+        -1, 1, -1, 1, -1, -1, 1, 0, 1, 0, 0, 0, 1, -1, 0, -1, 1, -1, -1, 0, 0, 0, -1, 0, 0, 1, -1, -1, 0, 0, 0, -1, 0, 
+        0, 0, -1, -1, 0, 1, 1, -1, 1, 1, 1, 1, -1, 0, -1, 0, -1, 0, -1, 0, -1, -1, -1, -1, 0, 1, -1, 0, -1, -1, 0, 0, 0, 
+        0, 0, 1, 1, 0, 1, -1, 0, -1, -1, -1, 0, 0, 1, 0, -1, -1, -1, -1, 0, -1, -1, -1, 0, -1, 0, 0, -1, 1, 1, -1, -1,   
+        1, 1, -1, 1, -1, 1, 0, -1, 1, -1, -1, -1, 0, 1, 1, 0, -1, 0, 1, 0, 0, 1, 1, 0, 0, -1, -1, 1, 0, 0, 0, 0, -1, 1,  
+        0, 1, 0, 0, 0, 1, -1, 1, -1, 0, 0, -1, 1, 1, -1, 0, 0, 1, -1, 0, 1, 0, -1, 1, -1, 0, 0, 1, -1, -1, -1, 0, 1, 0,  
+        -1, -1, 0, 1, 0, 0, 0, 1, -1, 1, -1, 0, 1, -1, -1, 0, 0, 0, -1, -1, 1, 1, 0, 1, -1, 0, 0, 0, -1, 0, -1, 0, -1,   
+        -1, -1, -1, 0, 1, -1, -1, 0, 1];
+
+        let exp = vec![1, 1, 1, -1, 0, 0, 0, -1, 0, 0, 0, 0, 0, -1, 1, -1, 1, -1, -1, -1, 1, 1, 0, 0, 1, 0, 0, 1, 0, -1, 1, 0, 1, -1, 0, 1, 
+        0, -1, 0, -1, 1, -1, -1, -1, -1, 0, 1, 0, 1, -1, 1, 0, 0, 0, 1, -1, 1, -1, -1, -1, 1, 0, 1, 1, 0, -1, 0, 0, 0,   
+        0, -1, 0, -1, 1, 1, 0, -1, 0, 1, 0, -1, 0, 1, -1, 1, -1, 0, -1, 0, -1, 0, 0, -1, 1, -1, 1, 0, 1, 1, 1, 1, 0, 0,  
+        -1, 1, 1, 0, 0, 1, 0, -1, -1, 1, -1, 0, 1, 1, 0, -1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, -1, 1, -1, -1, -1, 1, 1,   
+        0, 0, -1, -1, 1, -1, -1, -1, -1, -1, -1, 0, 0, 0, -1, 0, 1, 1, -1, -1, 1, 0, 1, 1, 1, 0, 1, 0, -1, 1, 0, -1, 0,  
+        1, 1, 1, 0, 1, 0, -1, 1, 1, -1, -1, -1, -1, 0, 1, -1, 0, 1, -1, 1, 1, 0, -1, 0, 1, -1, 0, 1, 0, 0, 1, 0, 1, -1,  
+        1, -1, 0, -1, 1, 0, -1, 0, -1, 0, -1, 0, 1, 0, 1, 0, -1, -1, 1, -1, 0, 1, 0, -1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1,   
+        -1, 1, 1, -1, 1];
+
+        let mut curlp81 = CurlP81::new();
+        let input_trits = TritsBuf::from_i8_unchecked(input);
+        let expected_hash = TritsBuf::from_i8_unchecked(exp);
+        let calculated_hash = curlp81.digest(&input_trits.as_trits());
         assert_eq!(expected_hash, calculated_hash);
     }
 }
