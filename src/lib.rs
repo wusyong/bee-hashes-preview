@@ -339,30 +339,37 @@ impl CurlP {
     /// The essence of this transformation is the application of a so-called substitution box to
     /// the internal state, which happens `round` number of times.
     fn transform(&mut self) {
+        fn calculate_truth_table_index(xs: &[i8], p: usize, q: usize) -> usize {
+            let idx = xs[p] + (xs[q] << 2) + 5;
+            idx as usize
+        }
+
         fn apply_substitution_box(input: &[i8], output: &mut [i8]) {
             assert!(input.len() <= CURLP_STATE_LEN);
             assert!(output.len() <= CURLP_STATE_LEN);
 
-            output[0] = TRUTH_TABLE[(input[0] + (input[364] << 2) + 5) as usize];
+            output[0] = TRUTH_TABLE[
+                calculate_truth_table_index(input, 0, CURLP_HALF_STATE_LEN)
+            ];
 
             for state_index in 0..CURLP_HALF_STATE_LEN {
-                let in_idx_a = CURLP_HALF_STATE_LEN - state_index;
-                let in_idx_b = CURLP_STATE_LEN - state_index - 1;
+                let left_idx = CURLP_HALF_STATE_LEN - state_index;
+                let right_idx = CURLP_STATE_LEN - state_index - 1;
 
                 output[2 * state_index + 1] = TRUTH_TABLE[
-                    { input[in_idx_a] + (input[in_idx_b] << 2) + 5 } as usize
+                    calculate_truth_table_index(input, left_idx, right_idx)
                 ];
 
-                let in_idx_a = in_idx_a - 1;
+                let left_idx = left_idx - 1;
                 output[2 * state_index + 2] = TRUTH_TABLE[
-                    { input[in_idx_b] + (input[in_idx_a] << 2) + 5 } as usize
+                    calculate_truth_table_index(input, right_idx, left_idx)
                 ];
             }
         }
 
         let (mut lhs, mut rhs) = (&mut self.state.0, &mut self.work_state.0);
 
-        for _i in 0..self.rounds {
+        for _ in 0..self.rounds {
             apply_substitution_box(lhs, rhs);
             std::mem::swap(&mut lhs, &mut rhs);
         }
@@ -478,7 +485,31 @@ mod tests {
     use super::*;
     use crate::utils::trytes_to_trits_buf;
 
-    const INPUT_DATA: &'static str = "\
+    const INPUT_TRITS: &[i8] = &[
+-1,  1, -1, -1,  1, -1,  1,  1,  0, -1,  0,  0,  1,  0,  1,  0,  0,  0, -1, -1, -1, -1,  0,  0, -1, 0,  0,  1,  0,
+ 0, -1,  0,  0,  1, -1, -1,  1, -1,  1, -1, -1,  1,  0,  1,  0,  0,  0,  1, -1,  0, -1,  1, -1, -1, 0,  0,  0, -1,
+ 0,  0,  1, -1, -1,  0,  0,  0, -1,  0,  0,  0, -1, -1,  0,  1,  1, -1,  1,  1,  1,  1, -1,  0, -1, 0, -1,  0, -1,
+ 0, -1, -1, -1, -1,  0,  1, -1,  0, -1, -1,  0,  0,  0,  0,  0,  1,  1,  0,  1, -1,  0, -1, -1, -1, 0,  0,  1,  0,
+-1, -1, -1, -1,  0, -1, -1, -1,  0, -1,  0,  0, -1,  1,  1, -1, -1,  1,  1, -1,  1, -1,  1,  0, -1, 1, -1, -1, -1,
+ 0,  1,  1,  0, -1,  0,  1,  0,  0,  1,  1,  0,  0, -1, -1,  1,  0,  0,  0,  0, -1,  1,  0,  1,  0, 0,  0,  1, -1,
+ 1, -1,  0,  0, -1,  1,  1, -1,  0,  0,  1, -1,  0,  1,  0, -1,  1, -1,  0,  0,  1, -1, -1, -1,  0, 1,  0, -1, -1,
+ 0,  1,  0,  0,  0,  1, -1,  1, -1,  0,  1, -1, -1,  0,  0,  0, -1, -1,  1,  1,  0,  1, -1,  0,  0, 0, -1,  0, -1,
+ 0, -1, -1, -1, -1,  0,  1, -1, -1,  0,  1,
+];
+
+    const EXPECTED_CURLP27_HASH_TRITS: &[i8] = &[
+-1, -1, -1, -1,  0,  0,  1,  1, -1,  1,  1, 0, -1,  1,  0,  1,  0,  0, 1,  0, -1,  1,  1, -1, -1, -1,  0,  1,  0,
+ 1, -1, -1,  1, -1, -1, -1, -1,  1,  1,  1, 1, -1,  1,  1,  1, -1,  0, 1, -1,  1,  0,  0,  1, -1,  1, -1,  1,  0,
+ 1,  0,  0,  1, -1,  1,  1, -1,  0,  0,  1, 1, -1,  0,  1,  0, -1,  0, 0,  1, -1, -1, -1,  0,  0, -1,  1,  0,  0,
+-1,  1,  1,  1,  0,  1,  0,  1,  0,  1,  0, 1, -1,  1,  0, -1,  1,  0, 1,  1,  0,  0, -1,  1, -1,  1,  0, -1,  0,
+ 1,  0,  1, -1,  1, -1,  0,  1,  0,  1,  1, 1, -1,  0,  1, -1,  0,  0, 0,  1,  0, -1,  0, -1,  0, -1, -1,  1, -1,
+ 1,  1,  0, -1,  1,  0, -1,  1,  0,  1, -1, 0,  0,  0, -1,  0,  0, -1, 0, -1, -1,  0,  0, -1, -1,  1,  1, -1, -1,
+-1,  0, -1,  0, -1, -1,  1, -1, -1, -1, -1, 0,  1,  0,  0,  1,  0,  1, 1,  0,  1, -1,  1,  0,  1, -1, -1, -1, -1,
+ 1,  0,  0, -1,  1,  1,  1, -1,  1,  0, -1, 0,  1, -1,  1,  1,  1,  0, 1,  1,  0, -1,  0,  1,  1, -1,  0, -1,  0,
+ 1,  0,  0,  1,  1,  1, -1,  0,  1, -1,  0,
+];
+
+    const INPUT_TRYTES: &str = "\
 RSWWSFXPQJUBJROQBRQZWZXZJWMUBVIVMHPPTYSNW9YQIQQF9RCSJJCVZG9ZWITXNCSBBDHEEKDRBHVTWCZ9SZOOZHVBPCQNPKTWFNZAWGCZ9QDIMK\
 RVINMIRZBPKRKQAIPGOHBTHTGYXTBJLSURDSPEOJ9UKJECUKCCPVIQQHDUYKVKISCEIEGVOQWRBAYXWGSJUTEVG9RPQLPTKYCRAJ9YNCUMDVDYDQCK\
 RJOAPXCSUDAJGETALJINHEVNAARIPONBWXUOQUFGNOCUSSLYWKOZMZUKLNITZIFXFWQAYVJCVMDTRSHORGNSTKX9Z9DLWNHZSMNOYTU9AUCGYBVIIT\
@@ -505,15 +536,24 @@ ZINYNCGZHHUNHBAIJHLYZIZGGIDFWVNXZQADLEDJFTIUTQWCQSX9QNGUZXGXJYUUTFSZPQKXBA9DFRQR
 TEWPJXZYLGHLQBAVYVOSABIVTQYQM9FIQKCBRRUEMVVTMERLWOK\
 ";
 
-    const EXPECTED_CURLP81_HASH: &'static str = "\
+    const EXPECTED_CURLP27_HASH_TRYTES: &str = "\
 KXRVLFETGUTUWBCNCC9DWO99JQTEI9YXVOZHWELSYP9SG9KN9WCKXOVTEFHFH9EFZJKFYCZKQPPBXYSGJ\
 ";
 
     #[test]
-    fn verify_curlp27_hash() {
+    fn verify_curlp27_hash_trytes() {
         let mut curlp27 = CurlP27::new();
-        let input_trits = trytes_to_trits_buf(INPUT_DATA);
-        let expected_hash = trytes_to_trits_buf(EXPECTED_CURLP81_HASH);
+        let input_trits = trytes_to_trits_buf(INPUT_TRYTES);
+        let expected_hash = trytes_to_trits_buf(EXPECTED_CURLP27_HASH_TRYTES);
+        let calculated_hash = curlp27.digest(&input_trits.as_trits());
+        assert_eq!(expected_hash, calculated_hash);
+    }
+
+    #[test]
+    fn verify_curlp27_hash_trits() {
+        let mut curlp27 = CurlP27::new();
+        let input_trits = TritsBuf::from_i8_unchecked(INPUT_TRITS);
+        let expected_hash = TritsBuf::from_i8_unchecked(EXPECTED_CURLP27_HASH_TRITS);
         let calculated_hash = curlp27.digest(&input_trits.as_trits());
         assert_eq!(expected_hash, calculated_hash);
     }
