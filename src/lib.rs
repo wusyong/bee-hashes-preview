@@ -10,6 +10,8 @@
 use std::convert::TryFrom;
 use std::default::Default;
 
+mod utils;
+
 /// The length of a hash as returned by the hash functions implemented in this RFC (in
 /// units of binary-coded, balanced trits).
 const HASH_LEN: usize = 243;
@@ -22,7 +24,7 @@ const CURLP_HALF_STATE_LEN: usize = CURLP_STATE_LEN / 2;
 const TRUTH_TABLE: [i8; 11] = [1, 0, -1, 2, 1, -1, 0, 2, -1, 1, 0];
 
 /// An owned, mutable 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TritsBuf(Vec<i8>);
 
 pub enum ValidTrits {
@@ -78,8 +80,8 @@ impl TritsBuf {
     ///
     /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
     /// usage of `Trits` might lead to unexpected behaviour.
-    pub fn from_i8_unchecked(v: &[i8]) -> Self {
-        Self(v.to_owned())
+    pub fn from_i8_unchecked<T: Into<Vec<i8>>>(v: T) -> Self {
+        Self(v.into())
     }
 
     /// Create a `Trits` from a `&[u8]` slice without verifying that its bytes are
@@ -93,15 +95,55 @@ impl TritsBuf {
     ///
     /// **WARNING:** If used incorrectly (that is, if the bytes are not correctly encoding trits), the
     /// usage of `Trits` might lead to unexpected behaviour.
-    pub fn from_u8_unchecked(v: &[u8]) -> Self {
-        Self::from_i8_unchecked(
-            unsafe {
-                &*(v as *const _ as *const [i8])
-        })
+    pub fn from_u8_unchecked<T: Into<Vec<u8>>>(v: T) -> Self {
+        let inner = v.into();
+        let mut inner = std::mem::ManuallyDrop::new(inner);
+
+        let p = inner.as_mut_ptr();
+        let len = inner.len();
+        let cap = inner.capacity();
+
+        let reconstructed = unsafe {
+            let p_as_i8 = p as *mut i8;
+            Vec::from_raw_parts(p_as_i8, len, cap)
+        };
+        Self::from_i8_unchecked(reconstructed)
     }
 }
 
+impl TryFrom<Vec<i8>> for TritsBuf {
+    type Error = FromI8Error;
+
+    fn try_from(vs: Vec<i8>) -> Result<Self, Self::Error> {
+        for v in &vs {
+            match v {
+                0 | -1 | 1 => {},
+                _ => Err(FromI8Error)?,
+            }
+        }
+        Ok(TritsBuf::from_i8_unchecked(vs))
+    }
+}
+
+impl TryFrom<Vec<u8>> for TritsBuf {
+    type Error = FromU8Error;
+
+    fn try_from(vs: Vec<u8>) -> Result<Self, Self::Error> {
+        for v in &vs {
+            match v {
+                0b0000_0000 | 0b1111_1111 | 0b0000_0001 => {},
+                _ => Err(FromU8Error)?,
+            }
+        }
+
+        Ok(Self::from_u8_unchecked(vs))
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Trits<'a>(&'a [i8]);
+
+#[derive(Debug, PartialEq)]
 pub struct TritsMut<'a>(&'a mut [i8]);
 
 pub struct FromU8Error;
@@ -304,23 +346,23 @@ impl CurlP {
             output[0] = TRUTH_TABLE[(input[0] + (input[364] << 2) + 5) as usize];
 
             for state_index in 0..CURLP_HALF_STATE_LEN {
-                let rhs_index_a = CURLP_HALF_STATE_LEN - state_index;
-                let rhs_index_b = CURLP_STATE_LEN - state_index - 1;
+                let in_idx_a = CURLP_HALF_STATE_LEN - state_index;
+                let in_idx_b = CURLP_STATE_LEN - state_index - 1;
 
                 output[2 * state_index + 1] = TRUTH_TABLE[
-                    { (input[rhs_index_a] + input[rhs_index_b] << 2) + 5 } as usize
+                    { input[in_idx_a] + (input[in_idx_b] << 2) + 5 } as usize
                 ];
 
-                let rhs_index_a = 364 - state_index - 1;
+                let in_idx_a = in_idx_a - 1;
                 output[2 * state_index + 2] = TRUTH_TABLE[
-                    { (input[rhs_index_b] + input[rhs_index_a] << 2) + 5 } as usize
+                    { input[in_idx_b] + (input[in_idx_a] << 2) + 5 } as usize
                 ];
             }
         }
 
         let (mut lhs, mut rhs) = (&mut self.state.0, &mut self.work_state.0);
 
-        for _ in 0..self.rounds {
+        for _i in 0..self.rounds {
             apply_substitution_box(lhs, rhs);
             std::mem::swap(&mut lhs, &mut rhs);
         }
@@ -431,3 +473,48 @@ macro_rules! forward_sponge_impl {
 
 forward_sponge_impl!(CurlP27, CurlP81);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::trytes_to_trits_buf;
+
+    const INPUT_DATA: &'static str = "\
+RSWWSFXPQJUBJROQBRQZWZXZJWMUBVIVMHPPTYSNW9YQIQQF9RCSJJCVZG9ZWITXNCSBBDHEEKDRBHVTWCZ9SZOOZHVBPCQNPKTWFNZAWGCZ9QDIMK\
+RVINMIRZBPKRKQAIPGOHBTHTGYXTBJLSURDSPEOJ9UKJECUKCCPVIQQHDUYKVKISCEIEGVOQWRBAYXWGSJUTEVG9RPQLPTKYCRAJ9YNCUMDVDYDQCK\
+RJOAPXCSUDAJGETALJINHEVNAARIPONBWXUOQUFGNOCUSSLYWKOZMZUKLNITZIFXFWQAYVJCVMDTRSHORGNSTKX9Z9DLWNHZSMNOYTU9AUCGYBVIIT\
+EPEKIXBCOFCMQPBGXYJKSHPXNUKFTXIJVYRFILAVXEWTUICZCYYPCEHNTK9SLGVL9RLAMYTAEPONCBHDXSEQZOXO9XCFUCPPMKEBR9IEJGQOPPILHF\
+XHMIULJYXZJASQEGCQDVYFOM9ETXAGVMSCHHQLFPATWOSMZIDL9AHMSDCE9UENACG9OVFAEIPPQYBCLXDMXXA9UBJFQQBCYKETPNKHNOUKCSSYLWZD\
+LKUARXNVKKKHNRBVSTVKQCZL9RY9BDTDTPUTFUBGRMSTOTXLWUHDMSGYRDSZLIPGQXIDMNCNBOAOI9WFUCXSRLJFIVTIPIAZUK9EDUJJ9B9YCJEZQQ\
+ELLHVCWDNRH9FUXDGZRGOVXGOKORTCQQA9JXNROLETYCNLRMBGXBL9DQKMOAZCBJGWLNJLGRSTYBKLGFVRUF9QOPZVQFGMDJA9TBVGFJDBAHEVOLW9\
+GNU9NICLCQJBOAJBAHHBZJGOFUCQMBGYQLCWNKSZPPBQMSJTJLM9GXOZHTNDLGIRCSIJAZTENQVQDHFSOQM9WVNWQQJNOPZMEISSCLOADMRNWALBBS\
+LSWNCTOSNHNLWZBVCFIOGFPCPRKQSRGKFXGTWUSCPZSKQNLQJGKDLOXSBJMEHQPDZGSENUKWAHRNONDTBLHNAKGLOMCFYRCGMDOVANPFHMQRFCZIQH\
+CGVORJJNYMTORDKPJPLA9LWAKAWXLIFEVLKHRKCDG9QPQCPGVKIVBENQJTJGZKFTNZHIMQISVBNLHAYSSVJKTIELGTETKPVRQXNAPWOBGQGFRMMK9U\
+QDWJHSQMYQQTCBMVQKUVGJEAGTEQDN9TCRRAZHDPSPIYVNKPGJSJZASZQBM9WXEDWGAOQPPZFLAMZLEZGXPYSOJRWL9ZH9NOJTUKXNTCRRDO9GKULX\
+BAVDRIZBOKJYVJUSHIX9F9O9ACYCAHUKBIEPVZWVJAJGSDQNZNWLIWVSKFJUMOYDMVUFLUXT9CEQEVRFBJVPCTJQCORM9JHLYFSMUVMFDXZFNCUFZZ\
+IKREIUIHUSHRPPOUKGFKWX9COXBAZMQBBFRFIBGEAVKBWKNTBMLPHLOUYOXPIQIZQWGOVUWQABTJT9ZZPNBABQFYRCQLXDHDEX9PULVTCQLWPTJLRS\
+VZQEEYVBVY9KCNEZXQLEGADSTJBYOXEVGVTUFKNCNWMEDKDUMTKCMRPGKDCCBDHDVVSMPOPUBZOMZTXJSQNVVGXNPPBVSBL9WWXWQNMHRMQFEQYKWN\
+CSW9URI9FYPT9UZMAFMMGUKFYTWPCQKVJ9DIHRJFMXRZUGI9TMTFUQHGXNBITDSORZORQIAMKY9VRYKLEHNRNFSEFBHF9KXIQAEZEJNQOENJVMWLMH\
+I9GNZPXYUIFAJIVCLAGKUZIKTJKGNQVTXJORWIQDHUPBBPPYOUPFAABBVMMYATXERQHPECDVYGWDGXFJKOMOBXKRZD9MCQ9LGDGGGMYGUAFGMQTUHZ\
+OAPLKPNPCIKUNEMQIZOCM9COAOMZSJ9GVWZBZYXMCNALENZ9PRYMHENPWGKX9ULUIGJUJRKFJPBTTHCRZQKEAHT9DC9GSWQEGDTZFHACZMLFYDVOWZ\
+ADBNMEM9XXEOMHCNJMDSUAJRQTBUWKJF9RZHK9ACGUNI9URFIHLXBXCEODONPXBSCWP9WNAEYNALKQHGULUQGAFL9LB9NBLLCACLQFGQMXRHGBTMI9\
+YKAJKVELRWWKJAPKMSYMJTDYMZ9PJEEYIRXRMMFLRSFSHIXUL9NEJABLRUGHJFL9RASMSKOI9VCFRZ9GWTMODUUESIJBHWWHZYCLDENBFSJQPIOYC9\
+MBGOOXSWEMLVU9L9WJXKZKVDBDMFSVHHISSSNILUMWULMVMESQUIHDGBDXROXGH9MTNFSLWJZRAPOKKRGXAAQBFPYPAAXLSTMNSNDTTJQSDQORNJS9\
+BBGQ9KQJZYPAQ9JYQZJ9B9KQDAXUACZWRUNGMBOQLQZUHFNCKVQGORRZGAHES9PWJUKZWUJSBMNZFILBNBQQKLXITCTQDDBV9UDAOQOUPWMXTXWFWV\
+MCXIXLRMRWMAYYQJPCEAAOFEOGZQMEDAGYGCTKUJBS9AGEXJAFHWWDZRYEN9DN9HVCMLFURISLYSWKXHJKXMHUWZXUQARMYPGKRKQMHVR9JEYXJRPN\
+ZINYNCGZHHUNHBAIJHLYZIZGGIDFWVNXZQADLEDJFTIUTQWCQSX9QNGUZXGXJYUUTFSZPQKXBA9DFRQRLTLUJENKESDGTZRGRSLTNYTITXRXRGVLWB\
+TEWPJXZYLGHLQBAVYVOSABIVTQYQM9FIQKCBRRUEMVVTMERLWOK\
+";
+
+    const EXPECTED_CURLP81_HASH: &'static str = "\
+KXRVLFETGUTUWBCNCC9DWO99JQTEI9YXVOZHWELSYP9SG9KN9WCKXOVTEFHFH9EFZJKFYCZKQPPBXYSGJ\
+";
+
+    #[test]
+    fn verify_curlp27_hash() {
+        let mut curlp27 = CurlP27::new();
+        let input_trits = trytes_to_trits_buf(INPUT_DATA);
+        let expected_hash = trytes_to_trits_buf(EXPECTED_CURLP81_HASH);
+        let calculated_hash = curlp27.digest(&input_trits.as_trits());
+        assert_eq!(expected_hash, calculated_hash);
+    }
+}
