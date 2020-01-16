@@ -2,7 +2,7 @@ use crate::TritsBuf;
 
 pub fn trytes_to_trits_buf(trytes: &str) -> TritsBuf {
     let mut trits_buf_internal = Vec::new();
-    for tryte in trytes.chars() {
+    for tryte in trytes.trim().chars() {
         let trits = match tryte {
             '9' => &[ 0, 0, 0],
             'A' => &[ 1, 0, 0],
@@ -17,7 +17,7 @@ pub fn trytes_to_trits_buf(trytes: &str) -> TritsBuf {
             'J' => &[ 1, 0, 1],
             'K' => &[-1, 1, 1],
             'L' => &[ 0, 1, 1],
-            'M' => &[ 1, 1,-1],
+            'M' => &[ 1, 1, 1],
             'N' => &[-1,-1,-1],
             'O' => &[ 0,-1,-1],
             'P' => &[ 1,-1,-1],
@@ -31,7 +31,9 @@ pub fn trytes_to_trits_buf(trytes: &str) -> TritsBuf {
             'X' => &[ 0,-1, 0],
             'Y' => &[ 1,-1, 0],
             'Z' => &[-1, 0, 0],
-            _ => panic!("unexpected character")
+            x => {
+                panic!("unexpected character: >>{}<<", x)
+            }
         };
         trits_buf_internal.extend_from_slice(trits);
     }                  
