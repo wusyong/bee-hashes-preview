@@ -7,9 +7,14 @@
 //!
 //! [PR #21]: https://github.com/iotaledger/bee-rfcs/pull/21
 
+#[macro_use]
+extern crate crunchy;
+
 use std::convert::TryFrom;
 use std::default::Default;
 
+mod keccak;
+pub mod kerl;
 mod utils;
 
 /// The length of a hash as returned by the hash functions implemented in this RFC (in
