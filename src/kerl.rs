@@ -1,5 +1,5 @@
-use crate::keccak::Keccak;
 use crate::{Sponge, Trits, TritsMut};
+use tiny_keccak::{Hasher, Keccak};
 
 pub const RADIX: i32 = 3;
 pub const BYTE_LENGTH: usize = 48;
@@ -21,12 +21,12 @@ pub const HALF_3: [u32; 12] = [
     0x5e69ebef,
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Kerl(Keccak);
 
 impl Default for Kerl {
     fn default() -> Kerl {
-        Kerl(Keccak::new_keccak384())
+        Kerl(Keccak::v384())
     }
 }
 
@@ -48,9 +48,7 @@ impl Sponge for Kerl {
         let mut bytes: [u8; BYTE_LENGTH] = [0; BYTE_LENGTH];
 
         for chunk in buf.0.chunks_mut(TRIT_LENGTH) {
-            self.0.pad();
-            self.0.fill_block();
-            self.0.squeeze(&mut bytes);
+            self.0.clone().finalize(&mut bytes);
             self.reset();
             bytes_to_trits(&mut bytes.to_vec(), chunk);
             for b in bytes.iter_mut() {
@@ -61,10 +59,12 @@ impl Sponge for Kerl {
     }
 
     fn reset(&mut self) {
-        self.0 = Keccak::new_keccak384();
+        self.0 = Keccak::v384();
     }
 }
 
+/// For more information about byte encoding and how BigInt is used, please see
+/// the following link: https://github.com/iotaledger/kerl/blob/master/IOTA-Kerl-spec.md#trits---bytes-encoding
 fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
     assert_eq!(trits.len(), TRIT_LENGTH);
     assert_eq!(bytes.len(), BYTE_LENGTH);
@@ -140,7 +140,7 @@ fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
     bytes.reverse();
 }
 
-    /// This will consume the input bytes slice and write to trits.
+/// This will consume the input bytes slice and write to trits.
 fn bytes_to_trits(bytes: &mut [u8], trits: &mut [i8]) {
     assert_eq!(bytes.len(), BYTE_LENGTH);
     assert_eq!(trits.len(), TRIT_LENGTH);
