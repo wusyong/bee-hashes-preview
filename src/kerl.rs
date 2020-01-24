@@ -69,10 +69,7 @@ fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
     assert_eq!(trits.len(), TRIT_LENGTH);
     assert_eq!(bytes.len(), BYTE_LENGTH);
 
-    // We _know_ that the sizes match.
-    // So this is safe enough to do and saves us a few allocations.
-    let base: &mut [u32] =
-        unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u32, 12) };
+    let mut base = [0; INT_LENGTH];
 
     base.clone_from_slice(&[0; 12]);
 
@@ -88,8 +85,8 @@ fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
 
     if all_minus_1 {
         base.clone_from_slice(&HALF_3);
-        bigint_not(base);
-        bigint_add_small(base, 1_u32);
+        bigint_not(&mut base);
+        bigint_add_small(&mut base, 1_u32);
     } else {
         for t in trits[0..TRIT_LENGTH - 1].iter().rev() {
             // multiply by radix
@@ -113,23 +110,23 @@ fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
             let trit = (t + 1) as u32;
             // addition
             {
-                let sz = bigint_add_small(base, trit);
+                let sz = bigint_add_small(&mut base, trit);
                 if sz > size {
                     size = sz;
                 }
             }
         }
 
-        if !is_null(base) {
-            if bigint_cmp(&HALF_3, base) <= 0 {
+        if !is_null(&base) {
+            if bigint_cmp(&HALF_3, &base) <= 0 {
                 // base >= HALF_3
                 // just do base - HALF_3
-                bigint_sub(base, &HALF_3);
+                bigint_sub(&mut base, &HALF_3);
             } else {
                 // we don't have a wrapping sub.
                 // so let's use some bit magic to achieve it
                 let mut tmp = HALF_3.clone();
-                bigint_sub(&mut tmp, base);
+                bigint_sub(&mut tmp, &base);
                 bigint_not(&mut tmp);
                 bigint_add_small(&mut tmp, 1_u32);
                 base.clone_from_slice(&tmp);
@@ -137,7 +134,16 @@ fn trits_to_bytes(trits: &[i8], bytes: &mut [u8]) {
         }
     }
 
-    bytes.reverse();
+    let mut out = [0; BYTE_LENGTH];
+    for i in 0..INT_LENGTH {
+        let offset = i * 4;
+        let tmp_base = base[INT_LENGTH - 1 - i];
+        out[offset] = ((tmp_base & 0xFF00_0000) >> 24) as u8;
+        out[offset + 1] = ((tmp_base & 0x00FF_0000) >> 16) as u8;
+        out[offset + 2] = ((tmp_base & 0x0000_FF00) >> 8) as u8;
+        out[offset + 3] = (tmp_base & 0x0000_00FF) as u8;
+    }
+    bytes.copy_from_slice(&out);
 }
 
 /// This will consume the input bytes slice and write to trits.
@@ -147,13 +153,15 @@ fn bytes_to_trits(bytes: &mut [u8], trits: &mut [i8]) {
 
     trits[TRIT_LENGTH - 1] = 0;
 
-    bytes.reverse();
-    // We _know_ that the sizes match.
-    // So this is safe enough to do and saves us a few allocations.
-    let base: &mut [u32] =
-        unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u32, 12) };
+    let mut base = [0; INT_LENGTH];
+    for i in 0..INT_LENGTH {
+        base[INT_LENGTH - 1 - i] = u32::from(bytes[i * 4]) << 24;
+        base[INT_LENGTH - 1 - i] |= u32::from(bytes[i * 4 + 1]) << 16;
+        base[INT_LENGTH - 1 - i] |= u32::from(bytes[i * 4 + 2]) << 8;
+        base[INT_LENGTH - 1 - i] |= u32::from(bytes[i * 4 + 3]);
+    }
 
-    if is_null(base) {
+    if is_null(&base) {
         trits.clone_from_slice(&[0; TRIT_LENGTH]);
         return;
     }
@@ -163,17 +171,17 @@ fn bytes_to_trits(bytes: &mut [u8], trits: &mut [i8]) {
     if base[INT_LENGTH - 1] >> 31 == 0 {
         // positive number
         // we need to add HALF_3 to move it into positvie unsigned space
-        bigint_add(base, &HALF_3);
+        bigint_add(&mut base, &HALF_3);
     } else {
         // negative number
-        bigint_not(base);
-        if bigint_cmp(base, &HALF_3) > 0 {
-            bigint_sub(base, &HALF_3);
+        bigint_not(&mut base);
+        if bigint_cmp(&base, &HALF_3) > 0 {
+            bigint_sub(&mut base, &HALF_3);
             flip_trits = true;
         } else {
-            bigint_add_small(base, 1 as u32);
+            bigint_add_small(&mut base, 1 as u32);
             let mut tmp = HALF_3.clone();
-            bigint_sub(&mut tmp, base);
+            bigint_sub(&mut tmp, &mut base);
             base.clone_from_slice(&tmp);
         }
     }
